@@ -1,0 +1,29 @@
+# ─── Firmware (ESP32 / PlatformIO) ───
+.pio/
+.vscode/
+*.elf
+*.bin
+*.hex
+*.map
+
+# ─── C# / .NET ───
+bin/
+obj/
+*.user
+*.suo
+.vs/
+TestResults/
+
+# ─── Secrets ───
+appsettings.Local.json
+appsettings.Development.json
+.env
+*.env
+
+# ─── Database ───
+*.db
+*.sqlite
+
+# ─── OS ───
+.DS_Store
+Thumbs.db
