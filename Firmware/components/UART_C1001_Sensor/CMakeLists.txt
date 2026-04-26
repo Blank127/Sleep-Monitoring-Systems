@@ -1,0 +1,9 @@
+idf_component_register(
+    SRCS
+        "UART_C1001_Sensor.c"
+    INCLUDE_DIRS
+        "include"
+    REQUIRES
+        esp_driver_uart
+        esp_driver_gpio
+)

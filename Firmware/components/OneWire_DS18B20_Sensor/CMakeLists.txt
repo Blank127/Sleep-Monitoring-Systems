@@ -1,0 +1,9 @@
+idf_component_register(
+    SRCS
+        "OneWire_DS18B20_Sensor.c"
+    INCLUDE_DIRS
+        "include"
+    REQUIRES
+        esp_driver_gpio
+        driver
+)

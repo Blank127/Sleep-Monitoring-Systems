@@ -1,2 +1,9 @@
-idf_component_register(SRCS "main.c"
-                    INCLUDE_DIRS ".")
+idf_component_register(
+    SRCS
+        "main.c"
+    INCLUDE_DIRS
+        "."
+    REQUIRES
+        UART_C1001_Sensor
+        OneWire_DS18B20_Sensor
+)
