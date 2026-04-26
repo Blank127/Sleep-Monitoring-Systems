@@ -1,3 +1,11 @@
+# ─── Firmware (ESP32 / PlatformIO) ───
+.pio/
+.vscode/
+*.elf
+*.bin
+*.hex
+*.map
+
 # ─── C# / .NET ───
 bin/
 obj/
@@ -5,10 +13,10 @@ obj/
 *.suo
 .vs/
 TestResults/
-appsettings.Local.json
-appsettings.Development.json
 
 # ─── Secrets ───
+appsettings.Local.json
+appsettings.Development.json
 .env
 *.env
 
