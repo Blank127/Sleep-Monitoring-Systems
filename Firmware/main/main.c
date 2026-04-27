@@ -25,6 +25,55 @@ typedef struct
 SleepData_t       g_sleep_data  = {0};
 SemaphoreHandle_t g_data_mutex  = NULL;
 
+// --- Helpers ---
+static const char *classify_temp_zone(float temp_c)
+{
+    if (temp_c < 16.0f) return "Too Cold";
+    if (temp_c < 18.0f) return "Cool";
+    if (temp_c < 22.0f) return "Ideal";
+    if (temp_c < 26.0f) return "Warm";
+    return "Too Hot";
+}
+
+// --- DS18B20 Task ---
+void ds18b20_task(void *pvParameters)
+{
+    if (!DS18B20_Init())
+    {
+        ESP_LOGE(TAG, "DS18B20 init failed: sensor not detected");
+        vTaskDelete(NULL);
+        return;
+    }
+
+    ESP_LOGI(TAG, "DS18B20 init OK");
+
+    while (true)
+    {
+        DS18B20_StartConversion();
+        vTaskDelay(pdMS_TO_TICKS(800));  // 12-bit conversion needs ≥750ms
+
+        float temp_c = DS18B20_ReadTemperature();
+        const char *zone = classify_temp_zone(temp_c);
+
+        if (xSemaphoreTake(g_data_mutex, pdMS_TO_TICKS(100)) == pdTRUE)
+        {
+            g_sleep_data.temperature_c = temp_c;
+            snprintf(g_sleep_data.temp_zone, sizeof(g_sleep_data.temp_zone), "%s", zone);
+            xSemaphoreGive(g_data_mutex);
+        }
+        else
+        {
+            ESP_LOGW(TAG, "DS18B20 task: could not take mutex");
+        }
+
+        ESP_LOGI(TAG, "--- DS18B20 ---");
+        ESP_LOGI(TAG, "Temperature : %.2f °C", temp_c);
+        ESP_LOGI(TAG, "Zone        : %s", zone);
+
+        vTaskDelay(pdMS_TO_TICKS(200));
+    }
+}
+
 // --- C1001 Task ---
 void c1001_task(void *pvParameters)
 {
@@ -119,6 +168,15 @@ void app_main(void)
         4096,           // stack size in bytes
         NULL,           // parameters
         5,              // priority
+        NULL            // handle, not needed
+    );
+
+    xTaskCreate(
+        ds18b20_task,   // function
+        "ds18b20_task", // name for debugging
+        4096,           // stack size in bytes
+        NULL,           // parameters
+        4,              // priority
         NULL            // handle, not needed
     );
 }
