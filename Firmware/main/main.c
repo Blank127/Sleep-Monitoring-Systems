@@ -11,12 +11,14 @@
 static const char *TAG = "MAIN";
 
 // --- Shared data struct ---
-typedef struct 
+typedef struct
 {
     uint8_t  presence;
-    uint8_t  heart_rate;       // 0xFF = no presence, 0 = acquiring
-    uint8_t  breathe_rate;     // 0xFF = no presence, 0 = acquiring
-    bool     vitals_locked;    // true = heart rate and breathe rate are valid
+    uint8_t  heart_rate;        // 0xFF = no presence, 0 = acquiring
+    uint8_t  breathe_rate;      // 0xFF = no presence, 0 = acquiring
+    uint8_t  apnea_events;      // 0xFF = no presence
+    uint8_t  sleep_disturbance; // 0xFF = no presence
+    bool     vitals_locked;
     float    temperature_c;
     char     temp_zone[16];
 } SleepData_t;
@@ -109,10 +111,12 @@ void c1001_task(void *pvParameters)
 
             if (xSemaphoreTake(g_data_mutex, pdMS_TO_TICKS(100)) == pdTRUE)
             {
-                g_sleep_data.presence      = data.presence;
-                g_sleep_data.heart_rate    = data.heart_rate;
-                g_sleep_data.breathe_rate  = data.breathe_rate;
-                g_sleep_data.vitals_locked = vitals_locked;
+                g_sleep_data.presence          = data.presence;
+                g_sleep_data.heart_rate        = data.heart_rate;
+                g_sleep_data.breathe_rate      = data.breathe_rate;
+                g_sleep_data.apnea_events      = data.apnea_events;
+                g_sleep_data.sleep_disturbance = data.sleep_disturbance;
+                g_sleep_data.vitals_locked     = vitals_locked;
                 xSemaphoreGive(g_data_mutex);
             }
             else
@@ -139,8 +143,27 @@ void c1001_task(void *pvParameters)
                     {
                         ESP_LOGI(TAG, "Heart Rate  : %d BPM", data.heart_rate);
                         ESP_LOGI(TAG, "Breathe Rate: %d BPM", data.breathe_rate);
-                    }
+                        ESP_LOGI(TAG, "Apnea Events: %d", data.apnea_events);
 
+                        switch (data.sleep_disturbance)
+                        {
+                            case 0: 
+                                ESP_LOGI(TAG, "Disturbance : Sleep < 4hrs");        
+                                break;
+                            case 1: 
+                                ESP_LOGI(TAG, "Disturbance : Sleep > 12hrs");       
+                                break;
+                            case 2: 
+                                ESP_LOGI(TAG, "Disturbance : Abnormal absence");    
+                                break;
+                            case 3: 
+                                ESP_LOGI(TAG, "Disturbance : None");                
+                                break;
+                            default: 
+                                ESP_LOGI(TAG, "Disturbance : N/A");                
+                                break;
+                        }
+                    }
                     break;
 
                 default:

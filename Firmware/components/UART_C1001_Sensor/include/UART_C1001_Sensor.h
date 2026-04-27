@@ -25,10 +25,13 @@
 #define SENSOR_TX_BUF_SIZE  1024
 
 // --- Sensor Data ---
-typedef struct {
-    uint8_t presence;       // 0 = no one present, 1 = someone present
-    uint8_t heart_rate;     // BPM — 0 = acquiring, 0xFF = no presence
-    uint8_t breathe_rate;   // BPM — 0 = acquiring, 0xFF = no presence
+typedef struct 
+{
+    uint8_t presence;           // 0 = no one, 1 = present
+    uint8_t heart_rate;         // BPM — 0 = acquiring, 0xFF = no presence
+    uint8_t breathe_rate;       // BPM — 0 = acquiring, 0xFF = no presence
+    uint8_t apnea_events;       // count of apnea events, 0xFF = read error
+    uint8_t sleep_disturbance;  // 0-2 = abnormal, 3 = none, 0xFF = read error
 } C1001_Sensor_Data_t;
 
 // --- Public API ---

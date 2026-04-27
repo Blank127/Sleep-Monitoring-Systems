@@ -21,7 +21,8 @@ static const char *TAG = "C1001";
 // --- Response parser states ---
 // The parser is a state machine that processes the response one byte at a time.
 // Each state represents where we are in the expected packet structure.
-typedef enum {
+typedef enum 
+{
     STATE_WAIT,     // Waiting for first header byte (0x53)
     STATE_HEAD,     // Got 0x53, waiting for second header byte (0x59)
     STATE_CON,      // Got header, waiting for control byte to match what we sent
@@ -252,6 +253,49 @@ static esp_err_t send_cmd_recv(uint8_t con, uint8_t cmd, uint8_t *send_data, uin
     }
 }
 
+static uint8_t C1001_get_apnea_events(void)
+{
+    uint8_t query = 0x0F;
+    uint8_t buf[22] = {0};  // sleep composite response is longer than a single value
+
+    // Query sleep composite (con=0x84, cmd=0x8D)
+    // The composite struct is memcopied from buf[6] in the Arduino library:
+    // [0] presence
+    // [1] sleepState
+    // [2] averageRespiration
+    // [3] averageHeartbeat
+    // [4] turnoverNumber
+    // [5] largeBodyMove
+    // [6] minorBodyMove
+    // [7] apneaEvents      ← buf[6+7] = buf[13]
+    esp_err_t ret = send_cmd_recv(0x84, 0x8D, &query, 1, buf, sizeof(buf));
+    if (ret != ESP_OK)
+    {
+        ESP_LOGE("C1001", "get_apnea_events failed: %s", esp_err_to_name(ret));
+        return 0xFF;
+    }
+
+    return buf[13];  // apneaEvents is the 8th field in the composite struct
+}
+
+static uint8_t C1001_get_sleep_disturbance(void)
+{
+    uint8_t query = 0x0F;
+    uint8_t buf[16] = {0};
+
+    // Query sleep disturbances (con=0x84, cmd=0x8E)
+    // Response buf[6]: 0 = sleep < 4hrs, 1 = sleep > 12hrs,
+    //                  2 = abnormal absence, 3 = none
+    esp_err_t ret = send_cmd_recv(0x84, 0x8E, &query, 1, buf, sizeof(buf));
+    if (ret != ESP_OK)
+    {
+        ESP_LOGE("C1001", "get_sleep_disturbance failed: %s", esp_err_to_name(ret));
+        return 0xFF;
+    }
+
+    return buf[6];
+}
+
 // -------------------------------------------------------
 // Public API
 // -------------------------------------------------------
@@ -340,36 +384,47 @@ esp_err_t C1001_get_data(C1001_Sensor_Data_t *out)
     if (!out) return ESP_ERR_INVALID_ARG;
 
     uint8_t query = 0x0F;
-    uint8_t buf[16] = {0};
+    uint8_t buf[22] = {0};
     esp_err_t ret;
 
-    // Query presence (con=0x80, cmd=0x81)
-    // Response buf[6]: 0 = no one, 1 = someone present
+    // Presence
     ret = send_cmd_recv(0x80, 0x81, &query, 1, buf, sizeof(buf));
     if (ret != ESP_OK) return ret;
     out->presence = buf[6];
 
-    // Skip vitals if no one is present — sensor won't have valid HR/BR data
+    // Skip vitals if no one is present
     if (out->presence != 1)
     {
-        out->heart_rate   = 0xFF;   // 0xFF signals N/A (no presence)
-        out->breathe_rate = 0xFF;
+        out->heart_rate        = 0xFF;
+        out->breathe_rate      = 0xFF;
+        out->apnea_events      = 0xFF;
+        out->sleep_disturbance = 0xFF;
         return ESP_OK;
     }
 
-    // Query heart rate (con=0x85, cmd=0x82)
-    // Response buf[6]: BPM value, 0 = still acquiring lock
+    // Heart rate
     memset(buf, 0, sizeof(buf));
     ret = send_cmd_recv(0x85, 0x82, &query, 1, buf, sizeof(buf));
     if (ret != ESP_OK) return ret;
     out->heart_rate = buf[6];
 
-    // Query breathing rate (con=0x81, cmd=0x82)
-    // Response buf[6]: breaths per minute, 0 = still acquiring lock
+    // Breathing rate
     memset(buf, 0, sizeof(buf));
     ret = send_cmd_recv(0x81, 0x82, &query, 1, buf, sizeof(buf));
     if (ret != ESP_OK) return ret;
     out->breathe_rate = buf[6];
+
+    // Apnea events from sleep composite (buf[13])
+    memset(buf, 0, sizeof(buf));
+    ret = send_cmd_recv(0x84, 0x8D, &query, 1, buf, sizeof(buf));
+    if (ret != ESP_OK) return ret;
+    out->apnea_events = buf[13];
+
+    // Sleep disturbance flag
+    memset(buf, 0, sizeof(buf));
+    ret = send_cmd_recv(0x84, 0x8E, &query, 1, buf, sizeof(buf));
+    if (ret != ESP_OK) return ret;
+    out->sleep_disturbance = buf[6];
 
     return ESP_OK;
 }
