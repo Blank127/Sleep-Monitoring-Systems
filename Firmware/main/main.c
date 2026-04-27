@@ -10,6 +10,9 @@
 
 static const char *TAG = "MAIN";
 
+// --- JSON buffer size ---
+#define JSON_BUF_SIZE 256
+
 // --- Shared data struct ---
 typedef struct
 {
@@ -24,8 +27,8 @@ typedef struct
 } SleepData_t;
 
 // --- Globals ---
-SleepData_t       g_sleep_data  = {0};
-SemaphoreHandle_t g_data_mutex  = NULL;
+SleepData_t       g_sleep_data = {0};
+SemaphoreHandle_t g_data_mutex = NULL;
 
 // --- Helpers ---
 static const char *classify_temp_zone(float temp_c)
@@ -35,6 +38,132 @@ static const char *classify_temp_zone(float temp_c)
     if (temp_c < 22.0f) return "Ideal";
     if (temp_c < 26.0f) return "Warm";
     return "Too Hot";
+}
+
+/**
+ * @brief Build a session_start JSON packet into buf.
+ *        Called once at boot to tell the server a new session has begun.
+ *
+ * Output: {"type":"session_start"}
+ *
+ * @param buf     Buffer to write the JSON string into
+ * @param buf_len Size of buf in bytes
+ * @return Number of bytes written, -1 if buf was too small
+ */
+static int build_session_start_packet(char *buf, size_t buf_len)
+{
+    int written = snprintf(buf, buf_len, "{\"type\":\"session_start\"}");
+
+    // if written >= buf_len the output was truncated
+    if (written < 0 || (size_t)written >= buf_len)
+    {
+        return -1;
+    }
+
+    return written;
+}
+
+/**
+ * @brief Build a reading JSON packet into buf from a snapshot of shared data.
+ *        Only call this when vitals_locked is true.
+ *
+ * Output: {"type":"reading","heart_rate":62,"breathe_rate":15,
+ *          "temperature_c":18.50,"temp_zone":"Ideal",
+ *          "apnea_events":0,"sleep_disturbance":3}
+ *
+ * @param buf     Buffer to write the JSON string into
+ * @param buf_len Size of buf in bytes
+ * @param data    Snapshot of SleepData_t taken under mutex
+ * @return Number of bytes written, -1 if buf was too small
+ */
+static int build_reading_packet(char *buf, size_t buf_len, const SleepData_t *data)
+{
+    int written = snprintf(buf, buf_len,
+        "{"
+            "\"type\":\"reading\","
+            "\"heart_rate\":%d,"
+            "\"breathe_rate\":%d,"
+            "\"temperature_c\":%.2f,"
+            "\"temp_zone\":\"%s\","
+            "\"apnea_events\":%d,"
+            "\"sleep_disturbance\":%d"
+        "}",
+        data->heart_rate,
+        data->breathe_rate,
+        data->temperature_c,
+        data->temp_zone,
+        data->apnea_events,
+        data->sleep_disturbance
+    );
+
+    if (written < 0 || (size_t)written >= buf_len)
+    {
+        return -1;
+    }
+
+    return written;
+}
+
+// --- Payload Task ---
+void payload_task(void *pvParameters)
+{
+    char json_buf[JSON_BUF_SIZE];
+
+    // Send session_start on boot
+    int len = build_session_start_packet(json_buf, sizeof(json_buf));
+    
+    if (len > 0)
+    {
+        ESP_LOGI(TAG, "SESSION START: %s", json_buf);
+    }
+    else
+    {
+        ESP_LOGE(TAG, "Failed to build session_start packet");
+    }
+
+    while (true)
+    {
+        vTaskDelay(pdMS_TO_TICKS(10000));
+
+        // Take a snapshot of shared data under mutex
+        SleepData_t snapshot;
+        if (xSemaphoreTake(g_data_mutex, pdMS_TO_TICKS(100)) == pdTRUE)
+        {
+            snapshot = g_sleep_data;
+            xSemaphoreGive(g_data_mutex);
+        }
+        else
+        {
+            ESP_LOGW(TAG, "Payload task: could not take mutex");
+            continue;
+        }
+
+        // Skip if no one present
+        if (snapshot.presence != 1)
+        {
+            ESP_LOGI(TAG, "Payload: no presence, skipping");
+            continue;
+        }
+
+        // Skip if vitals not yet locked
+        if (!snapshot.vitals_locked)
+        {
+            ESP_LOGI(TAG, "Payload: vitals acquiring, skipping");
+            continue;
+        }
+
+        // Build and log reading packet
+        len = build_reading_packet(json_buf, sizeof(json_buf), &snapshot);
+        if (len > 0)
+        {
+            // BLE transmission replaces this log later
+            ESP_LOGI(TAG, "PAYLOAD: %s", json_buf);
+        }
+        else
+        {
+            ESP_LOGE(TAG, "Failed to build reading packet");
+        }
+    }
 }
 
 // --- DS18B20 Task ---
@@ -60,7 +189,8 @@ void ds18b20_task(void *pvParameters)
         if (xSemaphoreTake(g_data_mutex, pdMS_TO_TICKS(100)) == pdTRUE)
         {
             g_sleep_data.temperature_c = temp_c;
-            snprintf(g_sleep_data.temp_zone, sizeof(g_sleep_data.temp_zone), "%s", zone);
+            snprintf(g_sleep_data.temp_zone, sizeof(g_sleep_data.temp_zone),
+                     "%s", zone);
             xSemaphoreGive(g_data_mutex);
         }
         else
@@ -69,7 +199,7 @@ void ds18b20_task(void *pvParameters)
         }
 
         ESP_LOGI(TAG, "--- DS18B20 ---");
-        ESP_LOGI(TAG, "Temperature : %.2f °C", temp_c);
+        ESP_LOGI(TAG, "Temperature : %.2f C", temp_c);
         ESP_LOGI(TAG, "Zone        : %s", zone);
 
         vTaskDelay(pdMS_TO_TICKS(200));
@@ -79,7 +209,6 @@ void ds18b20_task(void *pvParameters)
 // --- C1001 Task ---
 void c1001_task(void *pvParameters)
 {
-    // Init sensor
     esp_err_t ret = C1001_init();
 
     if (ret != ESP_OK)
@@ -103,10 +232,10 @@ void c1001_task(void *pvParameters)
         }
         else
         {
-            bool vitals_locked = (data.presence == 1) &&
-                                 (data.heart_rate != 0) &&
-                                 (data.heart_rate != 0xFF) &&
-                                 (data.breathe_rate != 0) &&
+            bool vitals_locked = (data.presence    == 1)    &&
+                                 (data.heart_rate   != 0)    &&
+                                 (data.heart_rate   != 0xFF) &&
+                                 (data.breathe_rate != 0)    &&
                                  (data.breathe_rate != 0xFF);
 
             if (xSemaphoreTake(g_data_mutex, pdMS_TO_TICKS(100)) == pdTRUE)
@@ -124,7 +253,6 @@ void c1001_task(void *pvParameters)
                 ESP_LOGW(TAG, "C1001 task: could not take mutex");
             }
 
-            // Log current state
             ESP_LOGI(TAG, "--- C1001 ---");
 
             switch (data.presence)
@@ -137,30 +265,31 @@ void c1001_task(void *pvParameters)
 
                 case 1:
                     ESP_LOGI(TAG, "Presence    : Someone present");
-                    ESP_LOGI(TAG, "Vitals      : %s", vitals_locked ? "Locked" : "Acquiring...");
+                    ESP_LOGI(TAG, "Vitals      : %s",
+                             vitals_locked ? "Locked" : "Acquiring...");
 
                     if (vitals_locked)
                     {
                         ESP_LOGI(TAG, "Heart Rate  : %d BPM", data.heart_rate);
                         ESP_LOGI(TAG, "Breathe Rate: %d BPM", data.breathe_rate);
-                        ESP_LOGI(TAG, "Apnea Events: %d", data.apnea_events);
+                        ESP_LOGI(TAG, "Apnea Events: %d",     data.apnea_events);
 
                         switch (data.sleep_disturbance)
                         {
-                            case 0: 
-                                ESP_LOGI(TAG, "Disturbance : Sleep < 4hrs");        
+                            case 0:
+                                ESP_LOGI(TAG, "Disturbance : Sleep < 4hrs");
                                 break;
-                            case 1: 
-                                ESP_LOGI(TAG, "Disturbance : Sleep > 12hrs");       
+                            case 1:
+                                ESP_LOGI(TAG, "Disturbance : Sleep > 12hrs");
                                 break;
-                            case 2: 
-                                ESP_LOGI(TAG, "Disturbance : Abnormal absence");    
+                            case 2:
+                                ESP_LOGI(TAG, "Disturbance : Abnormal absence");
                                 break;
-                            case 3: 
-                                ESP_LOGI(TAG, "Disturbance : None");                
+                            case 3:
+                                ESP_LOGI(TAG, "Disturbance : None");
                                 break;
-                            default: 
-                                ESP_LOGI(TAG, "Disturbance : N/A");                
+                            default:
+                                ESP_LOGI(TAG, "Disturbance : N/A");
                                 break;
                         }
                     }
@@ -171,6 +300,7 @@ void c1001_task(void *pvParameters)
                     break;
             }
         }
+
         vTaskDelay(pdMS_TO_TICKS(1000));
     }
 }
@@ -185,21 +315,7 @@ void app_main(void)
         return;
     }
 
-    xTaskCreate(
-        c1001_task,     // function
-        "c1001_task",   // name for debugging
-        4096,           // stack size in bytes
-        NULL,           // parameters
-        5,              // priority
-        NULL            // handle, not needed
-    );
-
-    xTaskCreate(
-        ds18b20_task,   // function
-        "ds18b20_task", // name for debugging
-        4096,           // stack size in bytes
-        NULL,           // parameters
-        4,              // priority
-        NULL            // handle, not needed
-    );
+    xTaskCreate(c1001_task,   "c1001_task",   4096, NULL, 5, NULL);
+    xTaskCreate(ds18b20_task, "ds18b20_task", 2048, NULL, 4, NULL);
+    xTaskCreate(payload_task, "payload_task", 4096, NULL, 3, NULL);
 }
