@@ -1,6 +1,8 @@
 idf_component_register(
     SRCS
         "main.c"
+        "tasks.c"
+        "payload.c"
     INCLUDE_DIRS
         "."
     REQUIRES
