@@ -1,0 +1,9 @@
+idf_component_register(
+    SRCS
+        "BLE_Server.c"
+    INCLUDE_DIRS
+        "include"
+    REQUIRES
+        bt
+        nvs_flash
+)

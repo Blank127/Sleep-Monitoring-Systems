@@ -7,10 +7,12 @@
 #include "esp_log.h"
 #include "UART_C1001_Sensor.h"
 #include "OneWire_DS18B20_Sensor.h"
+#include "BLE_Server.h"
 
 static const char *TAG = "MAIN";
 
 // --- JSON buffer size ---
+// Worst case reading packet is ~150 bytes, 256 gives comfortable headroom
 #define JSON_BUF_SIZE 256
 
 // --- Shared data struct ---
@@ -52,9 +54,10 @@ static const char *classify_temp_zone(float temp_c)
  */
 static int build_session_start_packet(char *buf, size_t buf_len)
 {
-    int written = snprintf(buf, buf_len, "{\"type\":\"session_start\"}");
+    int written = snprintf(buf, buf_len,
+        "{\"type\":\"session_start\"}"
+    );
 
-    // if written >= buf_len the output was truncated
     if (written < 0 || (size_t)written >= buf_len)
     {
         return -1;
@@ -76,7 +79,8 @@ static int build_session_start_packet(char *buf, size_t buf_len)
  * @param data    Snapshot of SleepData_t taken under mutex
  * @return Number of bytes written, -1 if buf was too small
  */
-static int build_reading_packet(char *buf, size_t buf_len, const SleepData_t *data)
+static int build_reading_packet(char *buf, size_t buf_len,
+                                 const SleepData_t *data)
 {
     int written = snprintf(buf, buf_len,
         "{"
@@ -111,14 +115,14 @@ void payload_task(void *pvParameters)
 
     // Send session_start on boot
     int len = build_session_start_packet(json_buf, sizeof(json_buf));
-    
     if (len > 0)
     {
         ESP_LOGI(TAG, "SESSION START: %s", json_buf);
-    }
-    else
-    {
-        ESP_LOGE(TAG, "Failed to build session_start packet");
+
+        if (BLE_is_connected())
+        {
+            BLE_send_payload(json_buf, len);
+        }
     }
 
     while (true)
@@ -152,16 +156,20 @@ void payload_task(void *pvParameters)
             continue;
         }
 
-        // Build and log reading packet
+        // Build and send reading packet
         len = build_reading_packet(json_buf, sizeof(json_buf), &snapshot);
         if (len > 0)
         {
-            // BLE transmission replaces this log later
             ESP_LOGI(TAG, "PAYLOAD: %s", json_buf);
-        }
-        else
-        {
-            ESP_LOGE(TAG, "Failed to build reading packet");
+
+            if (BLE_is_connected())
+            {
+                BLE_send_payload(json_buf, len);
+            }
+            else
+            {
+                ESP_LOGI(TAG, "No BLE client connected, payload not sent");
+            }
         }
     }
 }
@@ -184,6 +192,16 @@ void ds18b20_task(void *pvParameters)
         vTaskDelay(pdMS_TO_TICKS(800));  // 12-bit conversion needs ≥750ms
 
         float temp_c = DS18B20_ReadTemperature();
+        // Discard obviously invalid readings
+        // DS18B20 valid range is -55 to +125°C
+        // A reading of 0 or below -10 during normal room use is corrupt
+        if (temp_c < -10.0f || temp_c > 85.0f)
+        {
+            ESP_LOGW(TAG, "DS18B20: suspicious reading %.2f C, discarding", temp_c);
+            vTaskDelay(pdMS_TO_TICKS(200));
+            continue;
+        }
+        
         const char *zone = classify_temp_zone(temp_c);
 
         if (xSemaphoreTake(g_data_mutex, pdMS_TO_TICKS(100)) == pdTRUE)
@@ -307,11 +325,17 @@ void c1001_task(void *pvParameters)
 
 void app_main(void)
 {
-    // Create mutex before starting any tasks
     g_data_mutex = xSemaphoreCreateMutex();
     if (g_data_mutex == NULL)
     {
         ESP_LOGE(TAG, "Failed to create mutex");
+        return;
+    }
+
+    // Init BLE before starting tasks
+    if (BLE_init() != 0)
+    {
+        ESP_LOGE(TAG, "BLE init failed");
         return;
     }
 

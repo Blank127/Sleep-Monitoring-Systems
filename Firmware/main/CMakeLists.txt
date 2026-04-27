@@ -6,4 +6,5 @@ idf_component_register(
     REQUIRES
         UART_C1001_Sensor
         OneWire_DS18B20_Sensor
+        BLE_Server
 )

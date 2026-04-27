@@ -253,49 +253,6 @@ static esp_err_t send_cmd_recv(uint8_t con, uint8_t cmd, uint8_t *send_data, uin
     }
 }
 
-static uint8_t C1001_get_apnea_events(void)
-{
-    uint8_t query = 0x0F;
-    uint8_t buf[22] = {0};  // sleep composite response is longer than a single value
-
-    // Query sleep composite (con=0x84, cmd=0x8D)
-    // The composite struct is memcopied from buf[6] in the Arduino library:
-    // [0] presence
-    // [1] sleepState
-    // [2] averageRespiration
-    // [3] averageHeartbeat
-    // [4] turnoverNumber
-    // [5] largeBodyMove
-    // [6] minorBodyMove
-    // [7] apneaEvents      ← buf[6+7] = buf[13]
-    esp_err_t ret = send_cmd_recv(0x84, 0x8D, &query, 1, buf, sizeof(buf));
-    if (ret != ESP_OK)
-    {
-        ESP_LOGE("C1001", "get_apnea_events failed: %s", esp_err_to_name(ret));
-        return 0xFF;
-    }
-
-    return buf[13];  // apneaEvents is the 8th field in the composite struct
-}
-
-static uint8_t C1001_get_sleep_disturbance(void)
-{
-    uint8_t query = 0x0F;
-    uint8_t buf[16] = {0};
-
-    // Query sleep disturbances (con=0x84, cmd=0x8E)
-    // Response buf[6]: 0 = sleep < 4hrs, 1 = sleep > 12hrs,
-    //                  2 = abnormal absence, 3 = none
-    esp_err_t ret = send_cmd_recv(0x84, 0x8E, &query, 1, buf, sizeof(buf));
-    if (ret != ESP_OK)
-    {
-        ESP_LOGE("C1001", "get_sleep_disturbance failed: %s", esp_err_to_name(ret));
-        return 0xFF;
-    }
-
-    return buf[6];
-}
-
 // -------------------------------------------------------
 // Public API
 // -------------------------------------------------------
