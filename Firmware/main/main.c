@@ -37,9 +37,15 @@ void sensor_task(void *pvParameters)
             // Presence
             switch (data.presence)
             {
-                case 0:  ESP_LOGI(TAG, "Presence    : No one");          break;
-                case 1:  ESP_LOGI(TAG, "Presence    : Someone present"); break;
-                default: ESP_LOGI(TAG, "Presence    : Read error");      break;
+                case 0:  
+                    ESP_LOGI(TAG, "Presence    : No one");          
+                    break;
+                case 1:  
+                    ESP_LOGI(TAG, "Presence    : Someone present"); 
+                    break;
+                default: 
+                    ESP_LOGI(TAG, "Presence    : Read error");      
+                    break;
             }
 
             // Heart rate
