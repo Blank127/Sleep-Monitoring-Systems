@@ -9,7 +9,7 @@
 
 static const char *TAG = "MAIN";
 
-// --- Global definitions (declared extern in sleep_data.h) ---
+// --- Global definitions ---
 SleepData_t       g_sleep_data = {0};
 SemaphoreHandle_t g_data_mutex = NULL;
 

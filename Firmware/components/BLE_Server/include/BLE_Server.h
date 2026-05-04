@@ -4,12 +4,13 @@
  *
  * Advertises as "SleepMonitor" and exposes one notify characteristic.
  * The payload task calls BLE_send_payload() to transmit JSON data
- * split into 20 byte chunks.
+ * split into MTU-sized chunks.
  *
  * Typical usage:
  *   1. Call BLE_init() once at startup
  *   2. Call BLE_is_connected() before sending
- *   3. Call BLE_send_payload() with the JSON string
+ *   3. Call BLE_send_payload() with the JSON string — only sends if
+ *      the client has subscribed to notifications
  */
 #ifndef BLE_SERVER_H
 #define BLE_SERVER_H
@@ -18,8 +19,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 
-// --- BLE UUIDs ---
-// 128-bit custom UUIDs for the Sleep Monitor service and characteristic
+// --- BLE device name ---
 #define BLE_DEVICE_NAME     "SleepMonitor"
 
 // --- Public API ---
@@ -29,17 +29,18 @@
  *  @return 0 on success, non-zero on failure */
 int  BLE_init(void);
 
-/** @brief Check if a client is currently connected.
- *  @return true if connected, false otherwise */
+/** @brief Check if a client is currently connected AND has subscribed
+ *         to notifications.
+ *  @return true if ready to send, false otherwise */
 bool BLE_is_connected(void);
 
 /** @brief Send a JSON string to the connected client.
- *         Splits the string into 20 byte chunks and notifies each one.
- *         The client detects end of message when it receives a chunk
- *         smaller than 20 bytes.
+ *         Splits the string into MTU-sized chunks and notifies each one.
+ *         Sends a 0x04 (EOT) byte after the last chunk so the client
+ *         can reliably detect end-of-message regardless of payload length.
  *  @param json     Null-terminated JSON string to send
  *  @param json_len Length of the JSON string in bytes
- *  @return 0 on success, non-zero if not connected or send failed */
-int  BLE_send_payload(const char *json, int json_len);
+ *  @return 0 on success, non-zero if not connected/subscribed or send failed */
+int  BLE_send_payload(const char *json, size_t json_len);
 
 #endif // BLE_SERVER_H

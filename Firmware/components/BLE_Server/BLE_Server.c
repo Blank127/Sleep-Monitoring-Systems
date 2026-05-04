@@ -15,8 +15,14 @@
 
 static const char *TAG = "BLE";
 
-// --- BLE chunk size ---
-#define BLE_CHUNK_SIZE 20
+// --- Fallback chunk size (BLE 4.0 minimum payload) ---
+// Used only if MTU has not yet been negotiated.
+#define BLE_CHUNK_SIZE_MIN  20
+
+// --- End-of-message sentinel ---
+// Sent as a 1-byte notification after the last data chunk so the client
+// can detect end-of-message without relying on short chunk length.
+#define BLE_EOT_BYTE        0x04
 
 // --- 128-bit UUIDs ---
 // Service UUID: 12345678-1234-1234-1234-123456789ABC
@@ -33,8 +39,10 @@ static const ble_uuid128_t CHAR_UUID =
 
 // --- Internal state ---
 static bool     g_connected       = false;
+static bool     g_subscribed      = false;  // client has enabled notifications
 static uint16_t g_conn_handle     = 0;
-static uint16_t g_char_val_handle = 0;  // handle assigned by NimBLE at registration
+static uint16_t g_char_val_handle = 0;      // handle assigned by NimBLE at registration
+static uint16_t g_mtu             = BLE_CHUNK_SIZE_MIN + 3; // negotiated ATT MTU (default 23)
 
 // --- Forward declarations ---
 static void ble_advertise(void);
@@ -47,8 +55,7 @@ static void ble_advertise(void);
  * @brief Called by NimBLE when a client reads or writes the characteristic.
  *        We only use notify so reads return empty and writes are ignored.
  */
-static int gatt_char_access_cb(uint16_t conn_handle, uint16_t attr_handle,
-                                struct ble_gatt_access_ctxt *ctxt, void *arg)
+static int gatt_char_access_cb(uint16_t conn_handle, uint16_t attr_handle, struct ble_gatt_access_ctxt *ctxt, void *arg)
 {
     // Nothing to handle — characteristic is notify only
     return 0;
@@ -58,11 +65,13 @@ static int gatt_char_access_cb(uint16_t conn_handle, uint16_t attr_handle,
 // GATT service definition
 // -------------------------------------------------------
 
-static const struct ble_gatt_svc_def g_gatt_services[] = {
+static const struct ble_gatt_svc_def g_gatt_services[] = 
+{
     {
         .type = BLE_GATT_SVC_TYPE_PRIMARY,
         .uuid = &SERVICE_UUID.u,
-        .characteristics = (struct ble_gatt_chr_def[]) {
+        .characteristics = (struct ble_gatt_chr_def[]) 
+        {
             {
                 // Notify characteristic — ESP32 pushes data to client
                 .uuid       = &CHAR_UUID.u,
@@ -81,7 +90,7 @@ static const struct ble_gatt_svc_def g_gatt_services[] = {
 };
 
 // -------------------------------------------------------
-// GAP event handler — connection, disconnection
+// GAP event handler — connection, disconnection, MTU, subscribe
 // -------------------------------------------------------
 
 static int gap_event_cb(struct ble_gap_event *event, void *arg)
@@ -91,25 +100,29 @@ static int gap_event_cb(struct ble_gap_event *event, void *arg)
         case BLE_GAP_EVENT_CONNECT:
             if (event->connect.status == 0)
             {
-                // Client connected successfully
+                // Client connected — wait for subscription before sending
                 g_connected   = true;
+                g_subscribed  = false;
                 g_conn_handle = event->connect.conn_handle;
+                // Reset MTU to default until negotiated
+                g_mtu = BLE_CHUNK_SIZE_MIN + 3;
                 ESP_LOGI(TAG, "Client connected — handle %d", g_conn_handle);
             }
             else
             {
                 // Connection failed — restart advertising
                 ESP_LOGW(TAG, "Connection failed, restarting advertising");
-                g_connected = false;
+                g_connected  = false;
+                g_subscribed = false;
                 ble_advertise();
             }
             break;
 
         case BLE_GAP_EVENT_DISCONNECT:
-            // Client disconnected — restart advertising so it can reconnect
-            ESP_LOGI(TAG, "Client disconnected — reason %d",
-                     event->disconnect.reason);
-            g_connected = false;
+            // Client disconnected — clear all session state and re-advertise
+            ESP_LOGI(TAG, "Client disconnected — reason %d", event->disconnect.reason);
+            g_connected  = false;
+            g_subscribed = false;
             ble_advertise();
             break;
 
@@ -117,6 +130,18 @@ static int gap_event_cb(struct ble_gap_event *event, void *arg)
             // Advertising window ended — restart
             ESP_LOGI(TAG, "Advertising complete, restarting");
             ble_advertise();
+            break;
+
+        case BLE_GAP_EVENT_MTU:
+            // Client and server have negotiated a new ATT MTU
+            g_mtu = event->mtu.value;
+            ESP_LOGI(TAG, "MTU negotiated: %d bytes (payload: %d bytes)", g_mtu, g_mtu - 3);
+            break;
+
+        case BLE_GAP_EVENT_SUBSCRIBE:
+            // Client wrote to the CCCD — track whether notifications are enabled
+            g_subscribed = (bool)event->subscribe.cur_notify;
+            ESP_LOGI(TAG, "Client %s notifications", g_subscribed ? "subscribed to" : "unsubscribed from");
             break;
 
         default:
@@ -154,8 +179,7 @@ static void ble_advertise(void)
     adv_params.conn_mode = BLE_GAP_CONN_MODE_UND;
     adv_params.disc_mode = BLE_GAP_DISC_MODE_GEN;
 
-    rc = ble_gap_adv_start(BLE_OWN_ADDR_PUBLIC, NULL, BLE_HS_FOREVER,
-                            &adv_params, gap_event_cb, NULL);
+    rc = ble_gap_adv_start(BLE_OWN_ADDR_PUBLIC, NULL, BLE_HS_FOREVER, &adv_params, gap_event_cb, NULL);
     if (rc != 0)
     {
         ESP_LOGE(TAG, "Failed to start advertising: %d", rc);
@@ -186,7 +210,8 @@ static void ble_on_sync(void)
 static void ble_on_reset(int reason)
 {
     ESP_LOGE(TAG, "BLE stack reset — reason %d", reason);
-    g_connected = false;
+    g_connected  = false;
+    g_subscribed = false;
 }
 
 // -------------------------------------------------------
@@ -208,8 +233,7 @@ int BLE_init(void)
 {
     // NimBLE requires NVS
     esp_err_t ret = nvs_flash_init();
-    if (ret == ESP_ERR_NVS_NO_FREE_PAGES ||
-        ret == ESP_ERR_NVS_NEW_VERSION_FOUND)
+    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND)
     {
         ESP_ERROR_CHECK(nvs_flash_erase());
         ret = nvs_flash_init();
@@ -264,10 +288,11 @@ int BLE_init(void)
 
 bool BLE_is_connected(void)
 {
-    return g_connected;
+    // Only report ready if the client has also subscribed to notifications
+    return g_connected && g_subscribed;
 }
 
-int BLE_send_payload(const char *json, int json_len)
+int BLE_send_payload(const char *json, size_t json_len)
 {
     if (!g_connected)
     {
@@ -275,31 +300,50 @@ int BLE_send_payload(const char *json, int json_len)
         return -1;
     }
 
-    int offset = 0;
+    if (!g_subscribed)
+    {
+        ESP_LOGW(TAG, "BLE_send_payload: client connected but not subscribed");
+        return -1;
+    }
+
+    // Derive chunk size from negotiated MTU (ATT overhead is 3 bytes)
+    // Falls back to 20 if MTU is somehow below minimum
+    uint16_t payload_mtu = (g_mtu > 3) ? (g_mtu - 3) : BLE_CHUNK_SIZE_MIN;
+
+    size_t offset = 0;
 
     while (offset < json_len)
     {
-        // Calculate chunk size
-        int remaining  = json_len - offset;
-        int chunk_len  = (remaining > BLE_CHUNK_SIZE)
-                          ? BLE_CHUNK_SIZE
-                          : remaining;
+        size_t remaining  = json_len - offset;
+        size_t chunk_len  = (remaining > payload_mtu) ? payload_mtu : remaining;
 
-        // Build the notification buffer
-        struct os_mbuf *om = ble_hs_mbuf_from_flat(json + offset, chunk_len);
-        if (!om)
+        // Attempt to send with retries to handle transient mbuf exhaustion
+        int rc      = -1;
+        int retries = 3;
+
+        while (retries--)
         {
-            ESP_LOGE(TAG, "Failed to allocate mbuf for chunk at offset %d",
-                     offset);
-            return -1;
+            struct os_mbuf *om = ble_hs_mbuf_from_flat(json + offset, chunk_len);
+            if (!om)
+            {
+                ESP_LOGW(TAG, "mbuf alloc failed at offset %d, retrying...", (int)offset);
+                vTaskDelay(pdMS_TO_TICKS(10));
+                continue;
+            }
+
+            rc = ble_gatts_notify_custom(g_conn_handle, g_char_val_handle, om);
+            if (rc == 0)
+            {
+                break;
+            }
+
+            ESP_LOGW(TAG, "Notify failed at offset %d (rc=%d), retrying...", (int)offset, rc);
+            vTaskDelay(pdMS_TO_TICKS(10));
         }
 
-        // Send notification
-        int rc = ble_gatts_notify_custom(g_conn_handle,
-                                          g_char_val_handle, om);
         if (rc != 0)
         {
-            ESP_LOGE(TAG, "Notify failed at offset %d: %d", offset, rc);
+            ESP_LOGE(TAG, "Notify failed after retries at offset %d: %d", (int)offset, rc);
             return rc;
         }
 
@@ -309,8 +353,20 @@ int BLE_send_payload(const char *json, int json_len)
         vTaskDelay(pdMS_TO_TICKS(20));
     }
 
-    ESP_LOGI(TAG, "Sent %d bytes in %d chunks",
-             json_len, (json_len + BLE_CHUNK_SIZE - 1) / BLE_CHUNK_SIZE);
+    // Send EOT sentinel so client reliably knows the message is complete,
+    // regardless of whether the last chunk was full-sized.
+    struct os_mbuf *eot = ble_hs_mbuf_from_flat(&(uint8_t){BLE_EOT_BYTE}, 1);
+    if (eot)
+    {
+        ble_gatts_notify_custom(g_conn_handle, g_char_val_handle, eot);
+    }
+    else
+    {
+        ESP_LOGW(TAG, "Failed to allocate EOT mbuf");
+    }
+
+    int chunks = (int)((json_len + payload_mtu - 1) / payload_mtu);
+    ESP_LOGI(TAG, "Sent %d bytes in %d chunks (MTU payload: %d)", (int)json_len, chunks, payload_mtu);
 
     return 0;
 }

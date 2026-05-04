@@ -3,9 +3,7 @@
 
 int build_session_start_packet(char *buf, size_t buf_len)
 {
-    int written = snprintf(buf, buf_len,
-        "{\"type\":\"session_start\"}"
-    );
+    int written = snprintf(buf, buf_len, "{\"type\":\"session_start\"}");
 
     if (written < 0 || (size_t)written >= buf_len)
     {
@@ -15,8 +13,7 @@ int build_session_start_packet(char *buf, size_t buf_len)
     return written;
 }
 
-int build_reading_packet(char *buf, size_t buf_len,
-                          const SleepData_t *data)
+int build_reading_packet(char *buf, size_t buf_len, const SleepData_t *data)
 {
     int written = snprintf(buf, buf_len,
         "{"
