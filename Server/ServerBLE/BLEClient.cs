@@ -74,12 +74,12 @@ internal sealed class BleClient : IAsyncDisposable
         await device.Gatt.ConnectAsync();
         Status("GATT connected.");
 
+        // Give the ESP32 a moment to register the connection before we request services
+        await Task.Delay(1000);
+
         // ── 3. Find our service ────────────────────────────────────────────────
-        // GetPrimaryServiceAsync doesn't work reliably with 128-bit UUIDs in this
-        // version of InTheHand, so we get all services and find ours manually
         var services = await device.Gatt.GetPrimaryServicesAsync();
-        var service = services.FirstOrDefault(s =>
-            s.Uuid == BluetoothUuid.FromGuid(BleConstants.ServiceUuid));
+        var service = services.FirstOrDefault(s => s.Uuid == BluetoothUuid.FromGuid(BleConstants.ServiceUuid));
 
         if (service is null)
             throw new InvalidOperationException("Service UUID not found on device.");
@@ -87,8 +87,7 @@ internal sealed class BleClient : IAsyncDisposable
         Status("Service found.");
 
         // ── 4. Get the notify characteristic ──────────────────────────────────
-        var chr = await service.GetCharacteristicAsync(
-            BluetoothUuid.FromGuid(BleConstants.CharacteristicUuid));
+        var chr = await service.GetCharacteristicAsync(BluetoothUuid.FromGuid(BleConstants.CharacteristicUuid));
 
         if (chr is null)
             throw new InvalidOperationException("Characteristic UUID not found.");
@@ -103,11 +102,15 @@ internal sealed class BleClient : IAsyncDisposable
 
         // ── 6. Block until disconnect or Ctrl+C ────────────────────────────────
         // TaskCompletionSource acts as a gate — we wait here until something signals it
-        var disconnected = new TaskCompletionSource(
-            TaskCreationOptions.RunContinuationsAsynchronously);
+        var disconnected = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
 
         // Signal the gate if the ESP32 disconnects
-        device.GattServerDisconnected += (_, _) => disconnected.TrySetResult();
+        device.GattServerDisconnected += (_, _) =>
+        {
+            Console.WriteLine("[BLE] GattServerDisconnected event fired");
+            disconnected.TrySetResult();
+        };
+
         // Signal the gate if Ctrl+C is pressed
         ct.Register(() => disconnected.TrySetResult());
 
@@ -138,8 +141,7 @@ internal sealed class BleClient : IAsyncDisposable
     private static async Task<BluetoothDevice?> ScanAsync(CancellationToken ct)
     {
         // This task completes when the device is found
-        var found = new TaskCompletionSource<BluetoothDevice?>(
-            TaskCreationOptions.RunContinuationsAsynchronously);
+        var found = new TaskCompletionSource<BluetoothDevice?>(TaskCreationOptions.RunContinuationsAsynchronously);
 
         // Link the scan timeout to the app cancellation token
         // so Ctrl+C also cancels the scan
