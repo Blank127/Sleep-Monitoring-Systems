@@ -1,3 +1,4 @@
 <Solution>
   <Project Path="ServerBLE/ServerBLE.csproj" />
+  <Project Path="ServerDB/ServerDB.csproj" Id="3e71823b-9fa0-4c7f-8de4-d2474b556c56" />
 </Solution>
