@@ -27,3 +27,16 @@ appsettings.Development.json
 # ─── OS ───
 .DS_Store
 Thumbs.db
+
+# ─── Node / React ───
+node_modules/
+dist/
+.next/
+.nuxt/
+*.local
+
+# ─── Logs ───
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
