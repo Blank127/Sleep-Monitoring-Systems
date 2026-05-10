@@ -59,6 +59,11 @@ internal sealed class BleClient : IAsyncDisposable
     /// </summary>
     public event Action<string>? OnStatus;
 
+    /// <summary>
+    /// Fired when the ESP32 disconnects so the caller can close the active session.
+    /// </summary>
+    public event Func<Task>? OnDisconnected;
+
     // ── Public API ────────────────────────────────────────────────────────────
 
     /// <summary>
@@ -136,8 +141,7 @@ internal sealed class BleClient : IAsyncDisposable
         // GetPrimaryServiceAsync is unreliable with 128-bit UUIDs in this version
         // of InTheHand — get all services and find ours manually instead
         var services = await device.Gatt.GetPrimaryServicesAsync();
-        var service = services.FirstOrDefault(s =>
-            s.Uuid == BluetoothUuid.FromGuid(BleConstants.ServiceUuid));
+        var service = services.FirstOrDefault(s => s.Uuid == BluetoothUuid.FromGuid(BleConstants.ServiceUuid));
 
         if (service is null)
             throw new InvalidOperationException("Service UUID not found on device.");
@@ -162,12 +166,13 @@ internal sealed class BleClient : IAsyncDisposable
         // 6. Block until disconnect or Ctrl+C
         // TaskCompletionSource acts as a gate — execution pauses here until
         // either the ESP32 drops the connection or the cancellation token fires
-        var disconnected = new TaskCompletionSource(
-            TaskCreationOptions.RunContinuationsAsynchronously);
+        var disconnected = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
 
-        device.GattServerDisconnected += (_, _) =>
+        device.GattServerDisconnected += async (_, _) =>
         {
             Console.WriteLine("[BLE] GattServerDisconnected event fired");
+            if (OnDisconnected is not null)
+                await OnDisconnected.Invoke();
             disconnected.TrySetResult();
         };
 
@@ -179,7 +184,7 @@ internal sealed class BleClient : IAsyncDisposable
 
         // 7. Clean up
         chr.CharacteristicValueChanged -= OnNotification;
-        try { await chr.StopNotificationsAsync(); } catch { /* best effort */ }
+        try { await chr.StopNotificationsAsync(); } catch { }
 
         Status("Disconnected.");
     }
@@ -211,8 +216,7 @@ internal sealed class BleClient : IAsyncDisposable
     /// </returns>
     private static async Task<BluetoothDevice?> ScanAsync(CancellationToken ct)
     {
-        var found = new TaskCompletionSource<BluetoothDevice?>(
-            TaskCreationOptions.RunContinuationsAsynchronously);
+        var found = new TaskCompletionSource<BluetoothDevice?>(TaskCreationOptions.RunContinuationsAsynchronously);
 
         // Link the scan timeout with the app cancellation token so that
         // Ctrl+C aborts the scan immediately without waiting for the timeout
@@ -266,7 +270,7 @@ internal sealed class BleClient : IAsyncDisposable
 
         if (_characteristic is not null)
         {
-            try { await _characteristic.StopNotificationsAsync(); } catch { /* best effort */ }
+            try { await _characteristic.StopNotificationsAsync(); } catch { }
             _characteristic.CharacteristicValueChanged -= OnNotification;
         }
 

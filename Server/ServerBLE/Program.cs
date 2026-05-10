@@ -21,6 +21,7 @@ using ServerDB;
 
 // ── Configuration ─────────────────────────────────────────────────────────────
 // Load connection string from appsettings.json.
+// appsettings.Local.json overrides it locally with the real password.
 var config = new ConfigurationBuilder()
     .AddJsonFile("appsettings.json")
     .AddJsonFile("appsettings.Local.json", optional: true)
@@ -40,18 +41,45 @@ using (var db = new SleepMonitorDbContext(dbOptions))
     Console.WriteLine("[DB] Database ready.");
 }
 
-// Tracks the current active session ID
+// ── Shared state ──────────────────────────────────────────────────────────────
+// Tracks the current active session ID — null when no session is open
 int? activeSessionId = null;
 
+// ── Helper functions ──────────────────────────────────────────────────────────
+
+// Closes the active session in the database by setting EndedAt.
+// Safe to call multiple times — does nothing if no session is open.
+async Task CloseActiveSessionAsync()
+{
+    if (activeSessionId is null) return;
+
+    using var db = new SleepMonitorDbContext(dbOptions);
+    var session = await db.Sessions.FindAsync(activeSessionId);
+    if (session is not null)
+    {
+        session.EndedAt = DateTime.UtcNow;
+        await db.SaveChangesAsync();
+        Console.WriteLine($"[SESSION] Session {activeSessionId} closed.");
+    }
+
+    activeSessionId = null;
+}
+
 // ── Cancellation ──────────────────────────────────────────────────────────────
+// CancellationTokenSource is the mechanism that stops the BLE loop cleanly.
+// When Ctrl+C is pressed, e.Cancel = true prevents the process from terminating
+// immediately, giving the loop time to close the session and disconnect gracefully.
 using var cts = new CancellationTokenSource();
-Console.CancelKeyPress += (_, e) =>
+Console.CancelKeyPress += async (_, e) =>
 {
     e.Cancel = true;
+    await CloseActiveSessionAsync();
     cts.Cancel();
 };
 
 // ── Packet parser ─────────────────────────────────────────────────────────────
+// PacketParser accumulates raw BLE chunks and fires OnPacket when a complete
+// JSON message has been reassembled (signalled by the 0x04 EOT sentinel byte).
 var parser = new PacketParser();
 
 parser.OnPacket += async (type, data) =>
@@ -68,6 +96,12 @@ parser.OnPacket += async (type, data) =>
                 activeSessionId = session.Id;
                 Console.WriteLine($"\n[SESSION] New session started — id={session.Id}");
             }
+            break;
+
+        case "session_end":
+            // Close the active session — person has left the sensor range
+            await CloseActiveSessionAsync();
+            Console.WriteLine("\n[SESSION] Session ended — person left");
             break;
 
         case "reading":
@@ -123,9 +157,14 @@ parser.OnPacket += async (type, data) =>
 };
 
 // ── BLE client ────────────────────────────────────────────────────────────────
+// BleClient handles the full connection lifecycle: scan → connect → subscribe
+// → receive → disconnect → reconnect. Raw notification bytes are fed directly
+// into the parser.
 await using var client = new BleClient();
 
 client.OnStatus += msg => Console.WriteLine($"[BLE] {msg}");
 client.OnRawData += data => parser.Feed(data);
+client.OnDisconnected += async () => await CloseActiveSessionAsync();
 
+// Blocks here until Ctrl+C cancels the token
 await client.RunAsync(cts.Token);

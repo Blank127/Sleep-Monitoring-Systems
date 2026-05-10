@@ -121,3 +121,21 @@ int build_reading_packet(char *buf, size_t buf_len, const SleepData_t *data)
 
     return written;
 }
+
+/**
+ * @brief Build a session_end JSON packet into the provided buffer.
+ *
+ * @param buf      Destination buffer for the null-terminated JSON string.
+ * @param buf_len  Size of @p buf in bytes.
+ *
+ * @return Number of bytes written on success, -1 if buf was too small.
+ */
+int build_session_end_packet(char *buf, size_t buf_len)
+{
+    int written = snprintf(buf, buf_len, "{\"type\":\"session_end\"}");
+    if (written < 0 || (size_t)written >= buf_len)
+    {
+        return -1;
+    }
+    return written;
+}

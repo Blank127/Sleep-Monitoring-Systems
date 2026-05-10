@@ -68,4 +68,8 @@ int build_session_start_packet(char *buf, size_t buf_len);
  */
 int build_reading_packet(char *buf, size_t buf_len, const SleepData_t *data);
 
+/** @brief Build a session_end JSON packet into buf.
+ *  @return Number of bytes written, -1 if buf was too small */
+int build_session_end_packet(char *buf, size_t buf_len);
+
 #endif // PAYLOAD_H

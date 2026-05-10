@@ -72,6 +72,18 @@ static int32_t br_sum = 0;
  */
 static int32_t sample_count = 0;
 
+/// @brief Tracks whether presence was detected in the previous payload cycle.
+///        Used to detect transitions between present and absent.
+static bool was_present = false;
+
+/// @brief Counts consecutive payload cycles with no presence.
+///        Session end is only sent after NO_PRESENCE_THRESHOLD cycles.
+static uint8_t no_presence_count = 0;
+
+/// @brief Number of consecutive no-presence cycles before session_end is sent.
+///        At 10s per cycle, 3 cycles = 30 seconds.
+#define NO_PRESENCE_THRESHOLD 3
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Payload task
 // ─────────────────────────────────────────────────────────────────────────────
@@ -87,9 +99,12 @@ static int32_t sample_count = 0;
  *   2. Averages accumulated HR/BR samples from c1001_task into g_sleep_data
  *   3. Resets the averaging accumulators for the next window
  *   4. Takes a local snapshot of g_sleep_data and releases the mutex
- *   5. Skips the cycle if no presence or vitals not yet locked
- *   6. Builds a JSON reading packet from the snapshot
- *   7. Sends the packet over BLE if a client is connected
+ *   5. Checks presence — if absent, increments no_presence_count
+ *   6. If no_presence_count reaches NO_PRESENCE_THRESHOLD (30s), sends session_end
+ *   7. If presence just returned, sends session_start to open a new session
+ *   8. Skips the cycle if vitals not yet locked
+ *   9. Builds a JSON reading packet from the snapshot
+ *   10. Sends the packet over BLE if a client is connected
  *
  * The snapshot pattern (copy under mutex, process outside) keeps the mutex
  * held for the minimum possible time.
@@ -99,7 +114,6 @@ static int32_t sample_count = 0;
 void payload_task(void *pvParameters)
 {
     (void)pvParameters;
-
     char json_buf[JSON_BUF_SIZE];
 
     // Send session_start immediately on boot so the server knows a new
@@ -108,7 +122,6 @@ void payload_task(void *pvParameters)
     if (len > 0)
     {
         ESP_LOGI(TAG, "SESSION START: %s", json_buf);
-
         if (BLE_is_connected())
         {
             BLE_send_payload(json_buf, len);
@@ -125,17 +138,11 @@ void payload_task(void *pvParameters)
         {
             // If valid samples were collected during the 10s window,
             // average them and write back into g_sleep_data before snapshotting.
-            // This ensures the snapshot contains the smoothed value, not the
-            // raw last reading from c1001_task.
             if (sample_count > 0)
             {
                 g_sleep_data.heart_rate   = (uint8_t)(hr_sum / sample_count);
                 g_sleep_data.breathe_rate = (uint8_t)(br_sum / sample_count);
-
-                ESP_LOGI(TAG, "Averaged over %d samples — HR: %d BPM, BR: %d BPM",
-                         sample_count,
-                         g_sleep_data.heart_rate,
-                         g_sleep_data.breathe_rate);
+                ESP_LOGI(TAG, "Averaged over %d samples — HR: %d BPM, BR: %d BPM", sample_count, g_sleep_data.heart_rate, g_sleep_data.breathe_rate);
             }
 
             // Reset accumulators so the next 10s window starts fresh
@@ -144,39 +151,78 @@ void payload_task(void *pvParameters)
             sample_count = 0;
 
             // Copy shared data into a local snapshot, then release the mutex
-            // immediately — JSON building and BLE send happen outside the mutex
             snapshot = g_sleep_data;
             xSemaphoreGive(g_data_mutex);
         }
         else
         {
-            // Mutex not available within 100ms — skip this cycle rather than
-            // blocking indefinitely and delaying the next 10s window
             ESP_LOGW(TAG, "Payload task: could not take mutex");
             continue;
         }
 
-        // Skip if no one is present — no meaningful data to send
-        if (snapshot.presence != 1)
+        // Determine if presence is fully confirmed with locked vitals
+        bool currently_present = (snapshot.presence == 1) && snapshot.vitals_locked;
+
+        // ── Presence lost ─────────────────────────────────────────────────────
+        if (!currently_present)
         {
-            ESP_LOGI(TAG, "Payload: no presence, skipping");
+            no_presence_count++;
+
+            ESP_LOGI(TAG, "Payload: no presence (%d/%d cycles)", no_presence_count, NO_PRESENCE_THRESHOLD);
+
+            // Only send session_end after NO_PRESENCE_THRESHOLD consecutive
+            // cycles with no presence — avoids closing the session on a brief
+            // detection gap (e.g. person shifts position)
+            if (no_presence_count >= NO_PRESENCE_THRESHOLD && was_present)
+            {
+                len = build_session_end_packet(json_buf, sizeof(json_buf));
+                if (len > 0)
+                {
+                    ESP_LOGI(TAG, "SESSION END: %s", json_buf);
+                    if (BLE_is_connected())
+                    {
+                        BLE_send_payload(json_buf, len);
+                    }
+                }
+
+                was_present       = false;
+                no_presence_count = 0;
+            }
+
             continue;
         }
 
-        // Skip if the C1001 hasn't locked onto valid vitals yet.
-        // Normal during the first 30–60s after presence is detected.
+        // ── Presence confirmed ────────────────────────────────────────────────
+        // Reset the no-presence counter since someone is here
+        no_presence_count = 0;
+
+        // Person just arrived or returned — send session_start
+        if (!was_present)
+        {
+            len = build_session_start_packet(json_buf, sizeof(json_buf));
+            if (len > 0)
+            {
+                ESP_LOGI(TAG, "SESSION START: %s", json_buf);
+                if (BLE_is_connected())
+                {
+                    BLE_send_payload(json_buf, len);
+                }
+            }
+            was_present = true;
+        }
+
+        // ── Skip if vitals not yet locked ─────────────────────────────────────
         if (!snapshot.vitals_locked)
         {
             ESP_LOGI(TAG, "Payload: vitals acquiring, skipping");
             continue;
         }
 
-        // Build the JSON reading packet from the averaged snapshot
+        // ── Build and send reading packet ─────────────────────────────────────
         len = build_reading_packet(json_buf, sizeof(json_buf), &snapshot);
         if (len > 0)
         {
             ESP_LOGI(TAG, "PAYLOAD: %s", json_buf);
-
             if (BLE_is_connected())
             {
                 BLE_send_payload(json_buf, len);
