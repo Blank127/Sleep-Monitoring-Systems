@@ -79,7 +79,7 @@ Sleep-Monitoring-Systems/
 | Service | URL | Purpose |
 |---|---|---|
 | Vercel | [sleep-monitoring-systems.vercel.app](https://sleep-monitoring-systems.vercel.app) | React dashboard |
-| Render | [sleep-monitor-api.onrender.com](https://sleep-monitor-api.onrender.com) | ASP.NET Core API |
+| Render | sleep-monitor-api.onrender.com | ASP.NET Core API (protected) |
 | Neon | AWS US West 2 | Hosted PostgreSQL |
 
 > The BLE server (`ServerBLE`) runs locally on a Windows machine with Bluetooth hardware. It connects to the ESP32 and writes data directly to the hosted Neon database.
