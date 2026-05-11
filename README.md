@@ -4,6 +4,8 @@ A full-stack embedded system that monitors sleep vitals in real time using an ES
 
 ![Hardware Setup](docs/hardware.jpg)
 
+**Live demo:** [https://sleep-monitoring-systems.vercel.app](https://sleep-monitoring-systems.vercel.app)
+
 ---
 
 ## Overview
@@ -72,13 +74,25 @@ Sleep-Monitoring-Systems/
 
 ---
 
+## Deployment
+
+| Service | URL | Purpose |
+|---|---|---|
+| Vercel | [sleep-monitoring-systems.vercel.app](https://sleep-monitoring-systems.vercel.app) | React dashboard |
+| Render | [sleep-monitor-api.onrender.com](https://sleep-monitor-api.onrender.com) | ASP.NET Core API |
+| Neon | AWS US West 2 | Hosted PostgreSQL |
+
+> The BLE server (`ServerBLE`) runs locally on a Windows machine with Bluetooth hardware. It connects to the ESP32 and writes data directly to the hosted Neon database.
+
+---
+
 ## Setup
 
 ### Requirements
 
 | Tool | Version |
 |---|---|
-| ESP-IDF | v6.0 |
+| ESP-IDF | v5.x |
 | .NET | 10 |
 | PostgreSQL | 18 |
 | Node.js | 20+ |
