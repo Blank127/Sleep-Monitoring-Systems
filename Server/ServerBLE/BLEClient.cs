@@ -21,15 +21,11 @@ internal sealed class BleClient : IAsyncDisposable
 {
     // ── Constants ────────────────────────────────────────────────────────────
 
-    /// <summary>
-    /// How long to scan for the ESP32 before giving up and retrying (ms).
-    /// </summary>
-    private const int ScanTimeoutMs = 15_000;
+    /// <summary>How long to scan for the ESP32 before giving up and retrying (ms).</summary>
+    private const int ScanTimeoutMs = 15000;
 
-    /// <summary>
-    /// How long to wait before scanning again after a disconnect or error (ms).
-    /// </summary>
-    private const int ReconnectDelayMs = 5_000;
+    /// <summary>How long to wait before scanning again after a disconnect or error (ms).</summary>
+    private const int ReconnectDelayMs = 10000;
 
     // ── Private state ─────────────────────────────────────────────────────────
 
@@ -44,6 +40,12 @@ internal sealed class BleClient : IAsyncDisposable
     /// to stop the <see cref="RunAsync"/> loop cleanly.
     /// </summary>
     private bool _disposed;
+
+    /// <summary>
+    /// Guards against <see cref="OnDisconnected"/> being invoked multiple times
+    /// for the same disconnect event. Reset at the start of each session.
+    /// </summary>
+    private bool _disconnectHandled = false;
 
     // ── Public events ─────────────────────────────────────────────────────────
 
@@ -60,7 +62,8 @@ internal sealed class BleClient : IAsyncDisposable
     public event Action<string>? OnStatus;
 
     /// <summary>
-    /// Fired when the ESP32 disconnects so the caller can close the active session.
+    /// Fired once when the ESP32 disconnects so the caller can close the active session.
+    /// Guarded against multiple fires by <see cref="_disconnectHandled"/>.
     /// </summary>
     public event Func<Task>? OnDisconnected;
 
@@ -81,20 +84,22 @@ internal sealed class BleClient : IAsyncDisposable
         {
             try
             {
-                // Blocks until the ESP32 disconnects or an error occurs
                 await RunOneSessionAsync(ct);
             }
-            catch (OperationCanceledException) { break; } // Ctrl+C — exit cleanly
+            catch (OperationCanceledException) { break; }
             catch (Exception ex)
             {
-                // Any other error (e.g. UUID not found, connection dropped) — log and retry
                 Status($"Error: {ex.GetType().Name}: {ex.Message}");
             }
 
             if (!ct.IsCancellationRequested)
             {
                 Status($"Reconnecting in {ReconnectDelayMs / 1000}s...");
-                await Task.Delay(ReconnectDelayMs, ct);
+                try
+                {
+                    await Task.Delay(ReconnectDelayMs, ct);
+                }
+                catch (OperationCanceledException) { break; }
             }
         }
 
@@ -117,6 +122,9 @@ internal sealed class BleClient : IAsyncDisposable
     /// </exception>
     private async Task RunOneSessionAsync(CancellationToken ct)
     {
+        // Reset the disconnect guard for this session
+        _disconnectHandled = false;
+
         // 1. Scan
         Status($"Scanning for '{BleConstants.DeviceName}'...");
         var device = await ScanAsync(ct);
@@ -135,7 +143,7 @@ internal sealed class BleClient : IAsyncDisposable
         Status("GATT connected.");
 
         // Give the ESP32 a moment to register the connection before we request services
-        await Task.Delay(1000);
+        await Task.Delay(2000);
 
         // 3. Find our service
         // GetPrimaryServiceAsync is unreliable with 128-bit UUIDs in this version
@@ -147,10 +155,10 @@ internal sealed class BleClient : IAsyncDisposable
             throw new InvalidOperationException("Service UUID not found on device.");
 
         Status("Service found.");
+        await Task.Delay(500); // give ESP32 time before characteristic discovery
 
         // 4. Get the notify characteristic
-        var chr = await service.GetCharacteristicAsync(
-            BluetoothUuid.FromGuid(BleConstants.CharacteristicUuid));
+        var chr = await service.GetCharacteristicAsync(BluetoothUuid.FromGuid(BleConstants.CharacteristicUuid));
 
         if (chr is null)
             throw new InvalidOperationException("Characteristic UUID not found.");
@@ -163,26 +171,46 @@ internal sealed class BleClient : IAsyncDisposable
         await chr.StartNotificationsAsync();
         Status("Subscribed — waiting for data...");
 
-        // 6. Block until disconnect or Ctrl+C
-        // TaskCompletionSource acts as a gate — execution pauses here until
-        // either the ESP32 drops the connection or the cancellation token fires
         var disconnected = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        // Data watchdog — if no notification arrives within 60s, assume
+        // the connection is stale and force a reconnect
+        var watchdog = new CancellationTokenSource(TimeSpan.FromSeconds(60));
+        watchdog.Token.Register(() =>
+        {
+            Console.WriteLine("[BLE] Watchdog timeout — forcing reconnect");
+            // Explicitly disconnect so Windows releases the connection
+            // before we try to scan and reconnect
+            try { device.Gatt.Disconnect(); } catch { }
+            disconnected.TrySetResult();
+        });
+
+        // Reset the watchdog every time data arrives
+        Action<byte[]> resetWatchdog = _ =>
+        {
+            watchdog.CancelAfter(TimeSpan.FromSeconds(60));
+        };
+        OnRawData += resetWatchdog;
 
         device.GattServerDisconnected += async (_, _) =>
         {
+            if (_disconnectHandled) return;
+            _disconnectHandled = true;
+
             Console.WriteLine("[BLE] GattServerDisconnected event fired");
             if (OnDisconnected is not null)
                 await OnDisconnected.Invoke();
             disconnected.TrySetResult();
         };
 
-        // TrySetResult is used (not SetResult) because both handlers may fire
-        // simultaneously — the second call is safely ignored
         ct.Register(() => disconnected.TrySetResult());
 
         await disconnected.Task;
 
-        // 7. Clean up
+        // Clean up watchdog
+        OnRawData -= resetWatchdog;
+        watchdog.Dispose();
+
         chr.CharacteristicValueChanged -= OnNotification;
         try { await chr.StopNotificationsAsync(); } catch { }
 

@@ -10,6 +10,8 @@
  *   - Appends a single 0x04 (EOT) byte after the last chunk so the C# client
  *     can detect end-of-message without relying on chunk length
  *   - Re-advertises automatically on disconnect or failed connection
+ *   - Terminates stale connections if the client does not subscribe within
+ *     BLE_SUB_TIMEOUT_MS (handles Windows BLE cache after ESP32 resets)
  */
 
 #include "BLE_Server.h"
@@ -17,6 +19,7 @@
 #include "nvs_flash.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/timers.h"
 
 #include "nimble/nimble_port.h"
 #include "nimble/nimble_port_freertos.h"
@@ -49,6 +52,17 @@ static const char *TAG = "BLE";
  *  Value 0x04 follows the ASCII EOT control code convention.
  */
 #define BLE_EOT_BYTE        0x04
+
+/** @def BLE_SUB_TIMEOUT_MS
+ *  @brief Timeout in ms to wait for client subscription after connect.
+ *
+ *  If the client connects but does not subscribe to notifications within
+ *  this window, the connection is terminated and advertising restarts.
+ *  This handles stale Windows BLE connection handles that occur after
+ *  the ESP32 resets — Windows reconnects automatically using the cached
+ *  handle but the C# server hasn't had time to re-subscribe.
+ */
+#define BLE_SUB_TIMEOUT_MS  5000
 
 // ─────────────────────────────────────────────────────────────────────────────
 // UUIDs
@@ -98,11 +112,39 @@ static uint16_t g_char_val_handle = 0;
  *         Updated in the BLE_GAP_EVENT_MTU handler when the client requests a larger MTU. */
 static uint16_t g_mtu             = BLE_CHUNK_SIZE_MIN + 3;
 
+/** @brief FreeRTOS one-shot timer that fires BLE_SUB_TIMEOUT_MS after a client
+ *         connects. If the client has not subscribed by then, the connection is
+ *         terminated so the device re-advertises and accepts a fresh connection. */
+static TimerHandle_t g_sub_timeout_timer = NULL;
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Forward declarations
 // ─────────────────────────────────────────────────────────────────────────────
 
 static void ble_advertise(void);
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Subscription timeout callback
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * @brief FreeRTOS timer callback — fires if the client does not subscribe
+ *        within BLE_SUB_TIMEOUT_MS after connecting.
+ *
+ * Terminates the stale connection so the device re-advertises and is ready
+ * to accept a fresh connection from the C# server.
+ *
+ * @param xTimer  Timer handle (unused).
+ */
+static void sub_timeout_cb(TimerHandle_t xTimer)
+{
+    (void)xTimer;
+    if (g_connected && !g_subscribed)
+    {
+        ESP_LOGW(TAG, "Subscription timeout — terminating stale connection");
+        ble_gap_terminate(g_conn_handle, BLE_ERR_REM_USER_CONN_TERM);
+    }
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // GATT characteristic access callback
@@ -123,7 +165,7 @@ static void ble_advertise(void);
  *
  * @return 0 always.
  */
-static int gatt_char_access_cb(uint16_t conn_handle, uint16_t attr_handle, struct ble_gatt_access_ctxt *ctxt,void *arg)
+static int gatt_char_access_cb(uint16_t conn_handle, uint16_t attr_handle, struct ble_gatt_access_ctxt *ctxt, void *arg)
 {
     (void)conn_handle;
     (void)attr_handle;
@@ -196,19 +238,31 @@ static int gap_event_cb(struct ble_gap_event *event, void *arg)
         case BLE_GAP_EVENT_CONNECT:
             if (event->connect.status == 0)
             {
-                // Successful connection — mark connected but not yet subscribed.
-                // BLE_is_connected() returns false until the client enables
-                // notifications via the CCCD (BLE_GAP_EVENT_SUBSCRIBE).
                 g_connected   = true;
                 g_subscribed  = false;
                 g_conn_handle = event->connect.conn_handle;
-                g_mtu         = BLE_CHUNK_SIZE_MIN + 3; // Reset to default until negotiated
+                g_mtu         = BLE_CHUNK_SIZE_MIN + 3;
                 ESP_LOGI(TAG, "Client connected — handle %d", g_conn_handle);
+
+                // Start the subscription timeout timer.
+                xTimerStart(g_sub_timeout_timer, 0);
+
+                // Set connection supervision timeout to 10 seconds.
+                // If no GATT activity is received within this window the connection
+                // is automatically terminated — handles the case where the C# client
+                // disconnects without the ESP32 detecting it (e.g. watchdog reconnect).
+                struct ble_gap_upd_params conn_params = {
+                    .itvl_min            = BLE_GAP_INITIAL_CONN_ITVL_MIN,
+                    .itvl_max            = BLE_GAP_INITIAL_CONN_ITVL_MAX,
+                    .latency             = 0,
+                    .supervision_timeout = 1000, // units of 10ms = 10 seconds
+                    .min_ce_len          = 0,
+                    .max_ce_len          = 0,
+                };
+                ble_gap_update_params(g_conn_handle, &conn_params);
             }
             else
             {
-                // Connection attempt failed — restart advertising so
-                // the device remains discoverable
                 ESP_LOGW(TAG, "Connection failed, restarting advertising");
                 g_connected  = false;
                 g_subscribed = false;
@@ -217,8 +271,10 @@ static int gap_event_cb(struct ble_gap_event *event, void *arg)
             break;
 
         case BLE_GAP_EVENT_DISCONNECT:
-            // Client disconnected — clear all session state and re-advertise
+            // Client disconnected — stop the timeout timer, clear all session
+            // state, and re-advertise
             ESP_LOGI(TAG, "Client disconnected — reason %d", event->disconnect.reason);
+            xTimerStop(g_sub_timeout_timer, 0);
             g_connected  = false;
             g_subscribed = false;
             ble_advertise();
@@ -235,8 +291,7 @@ static int gap_event_cb(struct ble_gap_event *event, void *arg)
             // Client has requested a larger ATT MTU — update chunk size accordingly.
             // Larger MTU = fewer chunks per JSON payload = faster transmission.
             g_mtu = event->mtu.value;
-            ESP_LOGI(TAG, "MTU negotiated: %d bytes (payload: %d bytes)",
-                     g_mtu, g_mtu - 3);
+            ESP_LOGI(TAG, "MTU negotiated: %d bytes (payload: %d bytes)", g_mtu, g_mtu - 3);
             break;
 
         case BLE_GAP_EVENT_SUBSCRIBE:
@@ -244,8 +299,13 @@ static int gap_event_cb(struct ble_gap_event *event, void *arg)
             // cur_notify == 1 means notifications are now enabled.
             // cur_notify == 0 means the client has unsubscribed.
             g_subscribed = (bool)event->subscribe.cur_notify;
-            ESP_LOGI(TAG, "Client %s notifications",
-                     g_subscribed ? "subscribed to" : "unsubscribed from");
+            ESP_LOGI(TAG, "Client %s notifications", g_subscribed ? "subscribed to" : "unsubscribed from");
+
+            // Cancel the timeout — client subscribed successfully
+            if (g_subscribed)
+            {
+                xTimerStop(g_sub_timeout_timer, 0);
+            }
             break;
 
         default:
@@ -294,8 +354,7 @@ static void ble_advertise(void)
     adv_params.conn_mode = BLE_GAP_CONN_MODE_UND;
     adv_params.disc_mode = BLE_GAP_DISC_MODE_GEN;
 
-    rc = ble_gap_adv_start(BLE_OWN_ADDR_PUBLIC, NULL, BLE_HS_FOREVER,
-                           &adv_params, gap_event_cb, NULL);
+    rc = ble_gap_adv_start(BLE_OWN_ADDR_PUBLIC, NULL, BLE_HS_FOREVER, &adv_params, gap_event_cb, NULL);
     if (rc != 0)
     {
         ESP_LOGE(TAG, "Failed to start advertising: %d", rc);
@@ -380,7 +439,8 @@ static void nimble_host_task(void *param)
  *   4. Initialise GAP and GATT services
  *   5. Register the custom service and characteristic
  *   6. Set the device name
- *   7. Start the NimBLE host task — advertising begins when sync_cb fires
+ *   7. Create the subscription timeout timer
+ *   8. Creates subscription timeout timer and sets connection supervision timeout
  *
  * @return 0 on success, non-zero NimBLE error code on failure.
  */
@@ -433,6 +493,17 @@ int BLE_init(void)
     {
         ESP_LOGE(TAG, "Failed to set device name: %d", rc);
         return rc;
+    }
+
+    // Create the one-shot subscription timeout timer.
+    // Started on every connect, stopped when the client subscribes.
+    // If it fires, sub_timeout_cb() terminates the stale connection.
+    g_sub_timeout_timer = xTimerCreate("sub_timeout", pdMS_TO_TICKS(BLE_SUB_TIMEOUT_MS), pdFALSE, NULL, sub_timeout_cb);
+
+    if (g_sub_timeout_timer == NULL)
+    {
+        ESP_LOGE(TAG, "Failed to create subscription timeout timer");
+        return ESP_ERR_NO_MEM;
     }
 
     // Start the NimBLE host task — ble_on_sync() fires when the stack is
@@ -519,15 +590,13 @@ int BLE_send_payload(const char *json, size_t json_len)
                 break;
             }
 
-            ESP_LOGW(TAG, "Notify failed at offset %d (rc=%d), retrying...",
-                     (int)offset, rc);
+            ESP_LOGW(TAG, "Notify failed at offset %d (rc=%d), retrying...", (int)offset, rc);
             vTaskDelay(pdMS_TO_TICKS(10));
         }
 
         if (rc != 0)
         {
-            ESP_LOGE(TAG, "Notify failed after retries at offset %d: %d",
-                     (int)offset, rc);
+            ESP_LOGE(TAG, "Notify failed after retries at offset %d: %d", (int)offset, rc);
             return rc;
         }
 
@@ -552,8 +621,7 @@ int BLE_send_payload(const char *json, size_t json_len)
     }
 
     int chunks = (int)((json_len + payload_mtu - 1) / payload_mtu);
-    ESP_LOGI(TAG, "Sent %d bytes in %d chunks (MTU payload: %d)",
-             (int)json_len, chunks, payload_mtu);
+    ESP_LOGI(TAG, "Sent %d bytes in %d chunks (MTU payload: %d)", (int)json_len, chunks, payload_mtu);
 
     return 0;
 }

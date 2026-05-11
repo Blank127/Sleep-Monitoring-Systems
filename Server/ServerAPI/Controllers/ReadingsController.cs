@@ -73,4 +73,24 @@ public class ReadingsController : ControllerBase
 
         return Ok(reading);
     }
+
+    /// <summary>
+    /// Returns whether the ESP32 is currently active.
+    /// Considers the device active if a reading was received within the last 30 seconds.
+    /// </summary>
+    [HttpGet("status")]
+    public async Task<IActionResult> GetStatus()
+    {
+        var latest = await _db.Readings
+            .OrderByDescending(r => r.RecordedAt)
+            .FirstOrDefaultAsync();
+
+        if (latest is null)
+            return Ok(new { connected = false, lastSeen = (DateTime?)null });
+
+        var secondsAgo = (DateTime.UtcNow - latest.RecordedAt).TotalSeconds;
+        var connected = secondsAgo <= 30;
+
+        return Ok(new { connected, lastSeen = latest.RecordedAt });
+    }
 }

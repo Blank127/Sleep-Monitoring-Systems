@@ -439,6 +439,15 @@ esp_err_t C1001_init(void)
     // Wait for the sensor to come back up after the reset
     vTaskDelay(pdMS_TO_TICKS(10000));
 
+    // Set unattended time to 10 seconds.
+    // This controls how long the sensor holds the presence flag after
+    // the last detection before reporting "no one present".
+    // Default is several minutes — reducing it speeds up session end detection.
+    uint8_t unattended_time = 10;
+    uint8_t unattended_buf[16] = {0};
+    send_cmd_recv(0x84, 0x15, &unattended_time, 1, unattended_buf, sizeof(unattended_buf));
+    ESP_LOGI(TAG, "Unattended time set to %d seconds", unattended_time);
+
     ESP_LOGI(TAG, "C1001 init complete");
     return ESP_OK;
 }

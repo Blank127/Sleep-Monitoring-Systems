@@ -74,7 +74,7 @@ Console.CancelKeyPress += async (_, e) =>
 {
     e.Cancel = true;
     await CloseActiveSessionAsync();
-    cts.Cancel();
+    try { cts.Cancel(); } catch (ObjectDisposedException) { }
 };
 
 // ── Packet parser ─────────────────────────────────────────────────────────────
