@@ -78,7 +78,7 @@ Sleep-Monitoring-Systems/
 
 | Tool | Version |
 |---|---|
-| ESP-IDF | v5.x |
+| ESP-IDF | v6.0 |
 | .NET | 10 |
 | PostgreSQL | 18 |
 | Node.js | 20+ |
