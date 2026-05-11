@@ -13,6 +13,7 @@ obj/
 *.suo
 .vs/
 TestResults/
+*.csproj.Backup.tmp
 
 # ─── Secrets ───
 appsettings.Local.json
