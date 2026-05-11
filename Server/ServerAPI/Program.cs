@@ -38,6 +38,36 @@ if (app.Environment.IsDevelopment())
 // app.UseHttpsRedirection();
 app.UseCors("AllowReactApp");
 app.UseAuthorization();
+
+// API key middleware — rejects requests without the correct key
+app.Use(async (context, next) =>
+{
+    // Allow Swagger through without a key in development
+    if (context.Request.Path.StartsWithSegments("/swagger"))
+    {
+        await next();
+        return;
+    }
+
+    var expectedKey = builder.Configuration["ApiKey"];
+    if (string.IsNullOrEmpty(expectedKey))
+    {
+        // No key configured — allow all requests (local dev fallback)
+        await next();
+        return;
+    }
+
+    if (!context.Request.Headers.TryGetValue("X-Api-Key", out var providedKey)
+        || providedKey != expectedKey)
+    {
+        context.Response.StatusCode = 401;
+        await context.Response.WriteAsync("Unauthorized");
+        return;
+    }
+
+    await next();
+});
+
 app.MapControllers();
 
 app.Run();
